@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>In-browser NGSI-LD broker</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { max-width: 960px; margin: 0 auto; padding: 16px; }
+      #status[data-state='ready'] { color: seagreen; }
+      #status[data-state='error'] { color: crimson; }
+      #presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+      form { display: grid; gap: 8px; }
+      .row { display: flex; gap: 8px; }
+      #path { flex: 1; font-family: ui-monospace, monospace; }
+      textarea, pre { font-family: ui-monospace, monospace; font-size: 13px; }
+      pre { white-space: pre-wrap; word-break: break-all; border: 1px solid #8884; padding: 8px; min-height: 4em; }
+    </style>
+  </head>
+  <body>
+    <h1>In-browser NGSI-LD broker</h1>
+    <p>DuckDB-Wasm + OPFS. Requests below go to <code>broker.fetch(Request)</code>, not to a server.</p>
+    <p id="status" data-state="loading">loading DuckDB-Wasm…</p>
+    <div id="presets"></div>
+    <form id="console">
+      <div class="row">
+        <select id="method" aria-label="method">
+          <option>GET</option>
+          <option>POST</option>
+          <option>DELETE</option>
+        </select>
+        <input id="path" aria-label="path" value="/ngsi-ld/v1/entities?type=Building" />
+        <button id="send" type="submit">Send</button>
+      </div>
+      <textarea id="headers" aria-label="headers" rows="2" placeholder="Header: value (one per line)"></textarea>
+      <textarea id="body" aria-label="body" rows="12" placeholder="request body"></textarea>
+    </form>
+    <h2>Response</h2>
+    <pre id="response"></pre>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

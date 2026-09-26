@@ -87,6 +87,16 @@ test.describe('broker.fetch', () => {
     expect((await call(page, 'GET', '/ngsi-ld/v1/entities?georel=near&geometry=Point&coordinates=[0,0]')).status).toBe(400);
   });
 
+  test('DELETE removes an entity from every table', async ({ page }) => {
+    expect((await call(page, 'POST', '/ngsi-ld/v1/entities', { body: TOKYO })).status).toBe(201);
+    expect((await call(page, 'DELETE', `/ngsi-ld/v1/entities/${TOKYO.id}`)).status).toBe(204);
+    expect((await call(page, 'GET', `/ngsi-ld/v1/entities/${TOKYO.id}`)).status).toBe(404);
+    expect((await call(page, 'DELETE', `/ngsi-ld/v1/entities/${TOKYO.id}`)).status).toBe(404);
+    // The id is free again, so no attribute or type rows were left behind to collide with.
+    expect((await call(page, 'POST', '/ngsi-ld/v1/entities', { body: TOKYO })).status).toBe(201);
+    expect((await call(page, 'GET', `/ngsi-ld/v1/entities/${TOKYO.id}`)).body).toEqual(TOKYO);
+  });
+
   test('accepts application/ld+json with an inline @context', async ({ page }) => {
     const ctx = { Building: 'https://smartdatamodels.org/dataModel.Building/Building' };
     const res = await call(page, 'POST', '/ngsi-ld/v1/entities', {

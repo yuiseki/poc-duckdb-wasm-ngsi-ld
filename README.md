@@ -8,6 +8,9 @@ database: the app is a set of static files.
 
 This is a proof of concept, not a conformant NGSI-LD implementation.
 
+Demo: https://yuiseki.github.io/poc-duckdb-wasm-ngsi-ld/ (tested with
+Chromium only; the data stays in your browser's OPFS)
+
 ## Run
 
 ```sh
@@ -39,6 +42,11 @@ GeoQueries below, persistence across a page reload, and persistence across
 closing and relaunching the browser with the same profile (OPFS restore).
 It needs a Playwright Chromium (`npx playwright install chromium`) and
 network access to `extensions.duckdb.org` (see Constraints).
+
+`npm run smoke -- <url>` loads a deployed copy in a fresh Chromium, POSTs
+the three preset stations and runs the near query. GitHub Actions runs the
+unit and end-to-end tests on every push and deploys `dist/` to GitHub
+Pages from `main`.
 
 ## API
 
@@ -171,3 +179,11 @@ answer with the `Response` it sends back. This relay is not implemented.
 Subscriptions, the temporal API, federation and context source
 registration, multi-tenancy, full NGSI-LD v1.9.1 conformance, and a
 home-made JSON-LD processor.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The bundled NGSI-LD core context
+(`src/contexts/ngsi-ld-core-context-v1.8.json`, from
+[ETSI's NGSI-LD repository](https://forge.etsi.org/rep/NGSI-LD/NGSI-LD))
+is Copyright ETSI under the BSD 3-Clause license, see
+[src/contexts/LICENSE-ETSI](src/contexts/LICENSE-ETSI).

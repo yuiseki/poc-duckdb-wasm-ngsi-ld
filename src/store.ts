@@ -55,12 +55,24 @@ export class Store {
     }
   }
 
+  /** Run `fn` in a transaction, then checkpoint so the OPFS .duckdb file is self-contained. */
+  private async transaction(fn: () => Promise<void>): Promise<void> {
+    await this.conn.query('BEGIN TRANSACTION');
+    try {
+      await fn();
+      await this.conn.query('COMMIT');
+    } catch (err) {
+      await this.conn.query('ROLLBACK');
+      throw err;
+    }
+    await this.conn.query('CHECKPOINT');
+  }
+
   /** Insert an entity. Returns false if an entity with that id already exists. */
   insert(e: { id: string; types: string[]; attributes: CanonicalAttribute[] }): Promise<boolean> {
     return this.exclusive(async () => {
       if ((await this.all('SELECT 1 FROM entities WHERE id = ?', [e.id])).length) return false;
-      await this.conn.query('BEGIN TRANSACTION');
-      try {
+      await this.transaction(async () => {
         const now = new Date().toISOString();
         await this.all('INSERT INTO entities VALUES (?, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ)', [e.id, now, now]);
         for (const t of e.types) await this.all('INSERT INTO entity_types VALUES (?, ?)', [e.id, t]);
@@ -79,13 +91,7 @@ export class Store {
             ],
           );
         }
-        await this.conn.query('COMMIT');
-      } catch (err) {
-        await this.conn.query('ROLLBACK');
-        throw err;
-      }
-      // Fold the WAL into the .duckdb file so OPFS holds a self-contained database.
-      await this.conn.query('CHECKPOINT');
+      });
       return true;
     });
   }
@@ -93,11 +99,10 @@ export class Store {
   delete(id: string): Promise<boolean> {
     return this.exclusive(async () => {
       if (!(await this.all('SELECT 1 FROM entities WHERE id = ?', [id])).length) return false;
-      await this.conn.query('BEGIN TRANSACTION');
-      for (const table of ['attributes', 'entity_types']) await this.all(`DELETE FROM ${table} WHERE entity_id = ?`, [id]);
-      await this.all('DELETE FROM entities WHERE id = ?', [id]);
-      await this.conn.query('COMMIT');
-      await this.conn.query('CHECKPOINT');
+      await this.transaction(async () => {
+        for (const table of ['attributes', 'entity_types']) await this.all(`DELETE FROM ${table} WHERE entity_id = ?`, [id]);
+        await this.all('DELETE FROM entities WHERE id = ?', [id]);
+      });
       return true;
     });
   }

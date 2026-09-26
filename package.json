@@ -2,13 +2,20 @@
   "name": "poc-duckdb-wasm-ngsi-ld",
   "private": true,
   "version": "0.0.0",
+  "description": "A minimal NGSI-LD context broker that runs entirely in the browser on DuckDB-Wasm and OPFS",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuiseki/poc-duckdb-wasm-ngsi-ld.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@duckdb/duckdb-wasm": "^1.32.0",

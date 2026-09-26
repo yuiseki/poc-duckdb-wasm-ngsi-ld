@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lowerEntityQuery, parseGeoQuery } from '../../src/lower';
+import { boundingBox, lowerEntityQuery, parseGeoQuery, renderSql } from '../../src/lower';
 
 const params = (s: string) => new URLSearchParams(s);
 
@@ -36,63 +36,88 @@ describe('parseGeoQuery', () => {
     'georel=within&geometry=Point',
     'georel=within&geometry=Point&coordinates=nope',
     'georel=within&geometry=Circle&coordinates=[0,0]',
+    'georel=within&geometry=Point&coordinates=["0",0]',
+    'georel=within&geometry=Point&coordinates=[]',
   ])('rejects %s', (s) => {
     expect(() => parseGeoQuery(params(s))).toThrow(expect.objectContaining({ status: 400 }));
   });
 });
 
 describe('lowerEntityQuery', () => {
-  it('lowers a type query to a parameterised EXISTS', () => {
-    const { sql, params } = lowerEntityQuery({ types: ['https://ex.org/A', 'https://ex.org/B'], limit: 20, offset: 0 });
-    expect(sql).toContain('FROM entity_types t WHERE t.entity_id = e.id AND t.type IN (?, ?)');
-    expect(params).toEqual(['https://ex.org/A', 'https://ex.org/B', 20, 0]);
+  const LOC = 'https://uri.etsi.org/ngsi-ld/location';
+  const point = { type: 'Point', coordinates: [139.767, 35.681] };
+
+  it('lowers a type query to a parameterised IN', () => {
+    const q = lowerEntityQuery({ types: ['https://ex.org/A', 'https://ex.org/B'], limit: 20, offset: 0 });
+    expect(q.sql).toContain('e.id IN (SELECT t.entity_id FROM entity_types t WHERE t.type IN (?, ?))');
+    expect(q.sql).not.toContain('WITH geo');
+    expect(q.params).toEqual(['https://ex.org/A', 'https://ex.org/B', 20, 0]);
+    expect(q.countSql).toMatch(/^SELECT count\(\*\) AS n FROM entities e/);
+    expect(q.countParams).toEqual(['https://ex.org/A', 'https://ex.org/B']);
   });
 
-  it('lowers near;maxDistance to a spherical distance on flipped coordinates', () => {
-    const { sql, params } = lowerEntityQuery({
-      geo: {
-        georel: 'near',
-        maxDistance: 2000,
-        geometry: { type: 'Point', coordinates: [139.767, 35.681] },
-        geoproperty: 'https://uri.etsi.org/ngsi-ld/location',
-      },
-      limit: 20,
-      offset: 0,
-    });
+  it('lowers near;maxDistance to an R-tree box prefilter plus an exact spherical distance', () => {
+    const q = lowerEntityQuery({ geo: { georel: 'near', maxDistance: 1000, geometry: point, geoproperty: LOC }, limit: 20, offset: 0 });
+    expect(q.sql).toContain('WITH geo AS MATERIALIZED');
+    expect(q.sql).toContain('ST_Intersects(a.geom, ST_MakeEnvelope(?, ?, ?, ?))');
     // ST_Distance_Sphere takes [lat, lon]; NGSI-LD/GeoJSON is [lon, lat].
-    expect(sql).toContain('ST_Distance_Sphere(ST_FlipCoordinates(a.geom), ST_FlipCoordinates(ST_GeomFromGeoJSON(?))) <= ?');
-    expect(params).toEqual([
-      'https://uri.etsi.org/ngsi-ld/location',
-      '{"type":"Point","coordinates":[139.767,35.681]}',
-      2000,
-      20,
-      0,
-    ]);
+    expect(q.sql).toContain('ST_Distance_Sphere(ST_FlipCoordinates(g.geom), ST_FlipCoordinates(ST_GeomFromGeoJSON(?))) <= ?');
+    const [name, ...rest] = q.params;
+    expect(name).toBe(LOC);
+    expect(rest.slice(0, 4)).toEqual(boundingBox(139.767, 35.681, 1000));
+    expect(rest.slice(4)).toEqual([JSON.stringify(point), 1000, 20, 0]);
+  });
+
+  it('falls back to a scan for near;minDistance, which no box can prefilter', () => {
+    const q = lowerEntityQuery({ geo: { georel: 'near', minDistance: 1000, geometry: point, geoproperty: LOC }, limit: 1, offset: 0 });
+    expect(q.sql).not.toContain('WITH geo');
+    expect(q.sql).toContain('>= ?');
   });
 
   it.each([
     ['within', 'ST_Within(a.geom, ST_GeomFromGeoJSON(?))'],
     ['contains', 'ST_Contains(a.geom, ST_GeomFromGeoJSON(?))'],
     ['intersects', 'ST_Intersects(a.geom, ST_GeomFromGeoJSON(?))'],
-    ['disjoint', 'ST_Disjoint(a.geom, ST_GeomFromGeoJSON(?))'],
     ['equals', 'ST_Equals(a.geom, ST_GeomFromGeoJSON(?))'],
     ['overlaps', 'ST_Overlaps(a.geom, ST_GeomFromGeoJSON(?))'],
-  ] as const)('lowers %s', (georel, fragment) => {
-    const { sql } = lowerEntityQuery({
-      geo: { georel, geometry: { type: 'Point', coordinates: [0, 0] }, geoproperty: 'p' },
-      limit: 1,
-      offset: 0,
-    });
-    expect(sql).toContain(fragment);
+  ] as const)('lowers %s into the R-tree CTE', (georel, fragment) => {
+    const q = lowerEntityQuery({ geo: { georel, geometry: point, geoproperty: 'p' }, limit: 1, offset: 0 });
+    expect(q.sql).toContain('WITH geo AS MATERIALIZED');
+    expect(q.sql).toContain(fragment);
+    expect(q.sql).toContain('e.id IN (SELECT g.entity_id FROM geo g)');
   });
 
-  it('combines type and geo with AND', () => {
-    const { sql } = lowerEntityQuery({
-      types: ['T'],
-      geo: { georel: 'within', geometry: { type: 'Point', coordinates: [0, 0] }, geoproperty: 'p' },
-      limit: 1,
-      offset: 0,
-    });
-    expect(sql).toMatch(/t\.type IN \(\?\)\)\s+AND EXISTS/);
+  it('lowers disjoint without the index', () => {
+    const q = lowerEntityQuery({ geo: { georel: 'disjoint', geometry: point, geoproperty: 'p' }, limit: 1, offset: 0 });
+    expect(q.sql).not.toContain('WITH geo');
+    expect(q.sql).toContain('ST_Disjoint(a.geom, ST_GeomFromGeoJSON(?))');
+  });
+
+  it('combines type and geo with AND, CTE parameters first', () => {
+    const q = lowerEntityQuery({ types: ['T'], geo: { georel: 'within', geometry: point, geoproperty: 'p' }, limit: 5, offset: 10 });
+    expect(q.sql).toMatch(/FROM geo g\)\n  AND e\.id IN \(SELECT t\.entity_id/);
+    expect(q.params).toEqual(['p', JSON.stringify(point), 'T', 5, 10]);
+  });
+});
+
+describe('boundingBox', () => {
+  it('contains the circle, with the longitude span widened by latitude', () => {
+    const [minX, minY, maxX, maxY] = boundingBox(139.767, 35.681, 1000)!;
+    // 1 km is 0.00899 deg of latitude, and 0.0111 deg of longitude at 35.7N.
+    expect(maxY - 35.681).toBeGreaterThan(0.00899);
+    expect(maxX - 139.767).toBeGreaterThan(0.0111);
+    expect(maxX - 139.767).toBeLessThan(0.0114);
+    expect(139.767 - minX).toBeCloseTo(maxX - 139.767, 10);
+    expect(35.681 - minY).toBeCloseTo(maxY - 35.681, 10);
+  });
+
+  it('gives up near the poles', () => {
+    expect(boundingBox(0, 89.99, 5000)).toBeNull();
+  });
+});
+
+describe('renderSql', () => {
+  it('inlines parameters for display, quoting strings', () => {
+    expect(renderSql('a = ? AND b = ? AND c = ?', ["it's", 3, null])).toBe("a = 'it''s' AND b = 3 AND c = NULL");
   });
 });

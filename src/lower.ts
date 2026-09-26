@@ -20,6 +20,16 @@ export interface EntityQuery {
   offset: number;
 }
 
+export interface LoweredQuery {
+  sql: string; // selects the matching entity ids, ordered and paged
+  params: unknown[];
+  countSql: string; // counts all matches, ignoring limit and offset
+  countParams: unknown[];
+}
+
+const isNumberArray = (v: unknown): boolean =>
+  Array.isArray(v) && v.length > 0 && v.every((x) => (Array.isArray(x) ? isNumberArray(x) : Number.isFinite(x)));
+
 /** Parse `georel`, `geometry`, `coordinates` and `geoproperty`. Returns null when there is no geo-query. */
 export function parseGeoQuery(params: URLSearchParams): GeoQuery | null {
   const georelParam = params.get('georel');
@@ -37,7 +47,7 @@ export function parseGeoQuery(params: URLSearchParams): GeoQuery | null {
   } catch {
     throw badRequest('coordinates must be a JSON array');
   }
-  if (!Array.isArray(parsed)) throw badRequest('coordinates must be a JSON array');
+  if (!isNumberArray(parsed)) throw badRequest('coordinates must be a JSON array of numbers');
 
   const q: GeoQuery = {
     georel: rel as Georel,
@@ -61,57 +71,94 @@ export function parseGeoQuery(params: URLSearchParams): GeoQuery | null {
   return q;
 }
 
-const PREDICATES: Record<Exclude<Georel, 'near'>, string> = {
+// Predicates the DuckDB Spatial R-tree index can answer. ST_Disjoint cannot.
+const INDEXED: Record<string, string> = {
   within: 'ST_Within',
   contains: 'ST_Contains',
   intersects: 'ST_Intersects',
-  disjoint: 'ST_Disjoint',
   equals: 'ST_Equals',
   overlaps: 'ST_Overlaps',
 };
 
-/**
- * Lower a query to SQL selecting matching entity ids (`SELECT e.id ...`),
- * with `?` placeholders bound in order to `params`.
- */
-export function lowerEntityQuery(q: EntityQuery): { sql: string; params: unknown[] } {
-  const where: string[] = [];
-  const params: unknown[] = [];
+// A radius smaller than the Earth's, so the box around a circle is never too small.
+const EARTH_RADIUS_MIN = 6_356_752;
+const deg = (rad: number) => (rad * 180) / Math.PI;
 
-  if (q.types?.length) {
-    where.push(`EXISTS (SELECT 1 FROM entity_types t WHERE t.entity_id = e.id AND t.type IN (${q.types.map(() => '?').join(', ')}))`);
-    params.push(...q.types);
-  }
+/** The lon/lat box that contains every point within `metres` of (lon, lat), or null if it wraps a pole. */
+export function boundingBox(lon: number, lat: number, metres: number): [number, number, number, number] | null {
+  const angle = (metres / EARTH_RADIUS_MIN) * 1.01;
+  const sinLon = Math.sin(angle) / Math.cos((lat * Math.PI) / 180);
+  if (angle >= Math.PI / 2 || sinLon >= 1) return null;
+  const dLat = deg(angle);
+  const dLon = deg(Math.asin(sinLon));
+  return [lon - dLon, lat - dLat, lon + dLon, lat + dLat];
+}
+
+/**
+ * Lower a query to SQL. Geo predicates the R-tree can answer run in a
+ * MATERIALIZED CTE directly over `attributes`: only a filter sitting right on
+ * the table scan is rewritten into RTREE_INDEX_SCAN, and a correlated EXISTS,
+ * or a distance test in the same filter, would turn it back into a full scan.
+ */
+export function lowerEntityQuery(q: EntityQuery): LoweredQuery {
+  let cte: string | null = null;
+  const cteParams: unknown[] = [];
+  const where: string[] = [];
+  const whereParams: unknown[] = [];
 
   if (q.geo) {
     const g = q.geo;
     const target = 'ST_GeomFromGeoJSON(?)';
     const geomParam = JSON.stringify(g.geometry);
-    let pred: string;
-    const predParams: unknown[] = [];
     if (g.georel === 'near') {
       // ST_Distance_Sphere expects [lat, lon] axis order and POINT inputs only;
       // stored non-point geometries never match `near`.
-      const distance = `ST_Distance_Sphere(ST_FlipCoordinates(a.geom), ST_FlipCoordinates(${target}))`;
-      const parts: string[] = [];
-      if (g.maxDistance !== undefined) {
-        parts.push(`${distance} <= ?`);
-        predParams.push(geomParam, g.maxDistance);
+      const distance = `ST_Distance_Sphere(ST_FlipCoordinates(g.geom), ST_FlipCoordinates(${target}))`;
+      const tests = [`ST_GeometryType(g.geom) = 'POINT'`];
+      const testParams: unknown[] = [];
+      if (g.maxDistance !== undefined) tests.push(`${distance} <= ?`), testParams.push(geomParam, g.maxDistance);
+      if (g.minDistance !== undefined) tests.push(`${distance} >= ?`), testParams.push(geomParam, g.minDistance);
+      const [lon, lat] = g.geometry.coordinates as number[];
+      const box = g.maxDistance !== undefined ? boundingBox(lon, lat, g.maxDistance) : null;
+      if (box) {
+        cte = 'SELECT a.entity_id, a.geom FROM attributes a WHERE a.name = ? AND ST_Intersects(a.geom, ST_MakeEnvelope(?, ?, ?, ?))';
+        cteParams.push(g.geoproperty, ...box);
+        where.push(`e.id IN (SELECT g.entity_id FROM geo g WHERE ${tests.join(' AND ')})`);
+      } else {
+        where.push(`e.id IN (SELECT g.entity_id FROM attributes g WHERE g.name = ? AND g.geom IS NOT NULL AND ${tests.join(' AND ')})`);
+        whereParams.push(g.geoproperty);
       }
-      if (g.minDistance !== undefined) {
-        parts.push(`${distance} >= ?`);
-        predParams.push(geomParam, g.minDistance);
-      }
-      pred = `ST_GeometryType(a.geom) = 'POINT' AND ${parts.join(' AND ')}`;
+      whereParams.push(...testParams);
+    } else if (INDEXED[g.georel]) {
+      cte = `SELECT a.entity_id, a.geom FROM attributes a WHERE a.name = ? AND ${INDEXED[g.georel]}(a.geom, ${target})`;
+      cteParams.push(g.geoproperty, geomParam);
+      where.push('e.id IN (SELECT g.entity_id FROM geo g)');
     } else {
-      pred = `${PREDICATES[g.georel]}(a.geom, ${target})`;
-      predParams.push(geomParam);
+      where.push(`e.id IN (SELECT a.entity_id FROM attributes a WHERE a.name = ? AND a.geom IS NOT NULL AND ST_Disjoint(a.geom, ${target}))`);
+      whereParams.push(g.geoproperty, geomParam);
     }
-    where.push(`EXISTS (SELECT 1 FROM attributes a WHERE a.entity_id = e.id AND a.name = ? AND a.geom IS NOT NULL AND ${pred})`);
-    params.push(g.geoproperty, ...predParams);
   }
 
-  const sql = `SELECT e.id FROM entities e${where.length ? `\nWHERE ${where.join('\n  AND ')}` : ''}\nORDER BY e.id LIMIT ? OFFSET ?`;
-  params.push(q.limit, q.offset);
-  return { sql, params };
+  if (q.types?.length) {
+    where.push(`e.id IN (SELECT t.entity_id FROM entity_types t WHERE t.type IN (${q.types.map(() => '?').join(', ')}))`);
+    whereParams.push(...q.types);
+  }
+
+  const withClause = cte ? `WITH geo AS MATERIALIZED (\n  ${cte}\n)\n` : '';
+  const whereClause = where.length ? `\nWHERE ${where.join('\n  AND ')}` : '';
+  return {
+    sql: `${withClause}SELECT e.id FROM entities e${whereClause}\nORDER BY e.id LIMIT ? OFFSET ?`,
+    params: [...cteParams, ...whereParams, q.limit, q.offset],
+    countSql: `${withClause}SELECT count(*) AS n FROM entities e${whereClause}`,
+    countParams: [...cteParams, ...whereParams],
+  };
+}
+
+/** Inline parameters into SQL for display only; execution always uses the prepared statement. */
+export function renderSql(sql: string, params: unknown[]): string {
+  let i = 0;
+  return sql.replace(/\?/g, () => {
+    const p = params[i++];
+    return typeof p === 'number' ? String(p) : p === null || p === undefined ? 'NULL' : `'${String(p).replace(/'/g, "''")}'`;
+  });
 }

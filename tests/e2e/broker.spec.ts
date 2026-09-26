@@ -47,9 +47,10 @@ const PARK = {
   },
 };
 
+// These tests exercise the API on an empty database; demo.spec.ts covers the seeded demo.
 async function openApp(page: Page) {
-  await page.goto('/');
-  await expect(page.locator('#status')).toHaveAttribute('data-state', 'ready', { timeout: 60_000 });
+  await page.goto('/?seed=none');
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'ready', { timeout: 60_000 });
 }
 
 const ids = (r: Result) => (r.body as any[]).map((e) => e.id).sort();
@@ -155,20 +156,62 @@ test.describe('broker.fetch', () => {
   test('entities survive a page reload', async ({ page }) => {
     expect((await call(page, 'POST', '/ngsi-ld/v1/entities', { body: TOKYO })).status).toBe(201);
     await page.reload();
-    await expect(page.locator('#status')).toHaveAttribute('data-state', 'ready', { timeout: 60_000 });
+    await expect(page.locator('body')).toHaveAttribute('data-state', 'ready', { timeout: 60_000 });
     const got = await call(page, 'GET', `/ngsi-ld/v1/entities/${TOKYO.id}`);
     expect(got.status).toBe(200);
     expect(got.body).toEqual(TOKYO);
   });
 
-  test('the page UI sends requests to the broker', async ({ page }) => {
-    await page.getByRole('button', { name: 'POST Tokyo Station' }).click();
+  test('the Advanced console sends requests to the broker', async ({ page }) => {
+    await page.locator('#advanced summary').click();
+    await page.getByRole('button', { name: 'POST an entity' }).click();
     await page.locator('#send').click();
     await expect(page.locator('#response')).toHaveAttribute('data-status', '201');
-    await page.getByRole('button', { name: 'GET near Tokyo 10km' }).click();
+    await expect(page.locator('#stat-entities')).toHaveText('1');
+    await page.getByRole('button', { name: 'GET it' }).click();
     await page.locator('#send').click();
     await expect(page.locator('#response')).toHaveAttribute('data-status', '200');
-    await expect(page.locator('#response')).toContainText('urn:ngsi-ld:Building:tokyo-station');
+    await expect(page.locator('#response')).toContainText('urn:ngsi-ld:TouristAttraction:my-spot');
+  });
+
+  test('batch create reports created ids, conflicts and invalid entities', async ({ page }) => {
+    const all = await call(page, 'POST', '/ngsi-ld/v1/entityOperations/create', { body: [TOKYO, SHINJUKU] });
+    expect(all.status).toBe(201);
+    expect(all.body).toEqual([TOKYO.id, SHINJUKU.id]);
+    const mixed = await call(page, 'POST', '/ngsi-ld/v1/entityOperations/create', {
+      body: [OSAKA, TOKYO, OSAKA, { id: 'urn:ngsi-ld:Building:bad' }],
+    });
+    expect(mixed.status).toBe(207);
+    expect(mixed.body.success).toEqual([OSAKA.id]);
+    expect(mixed.body.errors.map((e: any) => [e.entityId, e.error.title]).sort()).toEqual(
+      [
+        [OSAKA.id, 'AlreadyExists'],
+        [TOKYO.id, 'AlreadyExists'],
+        ['urn:ngsi-ld:Building:bad', 'BadRequestData'],
+      ].sort(),
+    );
+    expect((await call(page, 'GET', `/ngsi-ld/v1/entities/${OSAKA.id}`)).body).toEqual(OSAKA);
+  });
+
+  test('query responses carry the count, the lowered SQL, timings and, on request, the plan', async ({ page }) => {
+    await call(page, 'POST', '/ngsi-ld/v1/entityOperations/create', { body: [TOKYO, SHINJUKU, OSAKA] });
+    const path = '/ngsi-ld/v1/entities?type=Building&georel=near;maxDistance==6500&geometry=Point&coordinates=[139.7671,35.6812]&count=true&limit=1';
+    const r = await call(page, 'GET', path, { headers: { 'X-Explain': '1' } });
+    expect(r.body).toHaveLength(1);
+    expect(r.headers['ngsild-results-count']).toBe('2');
+    expect(decodeURIComponent(r.headers['x-lowered-sql'])).toContain('ST_MakeEnvelope(');
+    expect(r.headers['server-timing']).toMatch(/^sql;dur=[\d.]+, count;dur=[\d.]+, total;dur=[\d.]+$/);
+    expect(decodeURIComponent(r.headers['x-query-plan'])).toContain('RTREE_INDEX_SCAN');
+  });
+
+  test('GeoJSON representation', async ({ page }) => {
+    await call(page, 'POST', '/ngsi-ld/v1/entities', { body: TOKYO });
+    const r = await call(page, 'GET', '/ngsi-ld/v1/entities?type=Building', { headers: { Accept: 'application/geo+json' } });
+    expect(r.headers['content-type']).toBe('application/geo+json');
+    expect(r.body).toEqual({
+      type: 'FeatureCollection',
+      features: [{ id: TOKYO.id, type: 'Feature', geometry: TOKYO.location.value, properties: TOKYO }],
+    });
   });
 });
 
@@ -180,6 +223,7 @@ test('entities survive closing and relaunching the browser (OPFS)', async ({ bas
     await openApp(page);
     expect((await call(page, 'POST', '/ngsi-ld/v1/entities', { body: OSAKA })).status).toBe(201);
     await ctx.close();
+    // A reopened database must stay writable, not only readable.
 
     ctx = await chromium.launchPersistentContext(profile, { baseURL });
     page = await ctx.newPage();
@@ -189,6 +233,7 @@ test('entities survive closing and relaunching the browser (OPFS)', async ({ bas
     expect(got.body).toEqual(OSAKA);
     const r = await call(page, 'GET', '/ngsi-ld/v1/entities?georel=near;maxDistance==1000&geometry=Point&coordinates=[135.4959,34.7025]');
     expect(ids(r)).toEqual([OSAKA.id]);
+    expect((await call(page, 'POST', '/ngsi-ld/v1/entities', { body: TOKYO })).status).toBe(201);
     await ctx.close();
   } finally {
     rmSync(profile, { recursive: true, force: true });

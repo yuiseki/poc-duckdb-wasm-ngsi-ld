@@ -5,38 +5,137 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>In-browser NGSI-LD broker</title>
     <style>
-      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-      body { max-width: 960px; margin: 0 auto; padding: 16px; }
-      #status[data-state='ready'] { color: seagreen; }
-      #status[data-state='error'] { color: crimson; }
-      #presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-      form { display: grid; gap: 8px; }
-      .row { display: flex; gap: 8px; }
-      #path { flex: 1; font-family: ui-monospace, monospace; }
-      textarea, pre { font-family: ui-monospace, monospace; font-size: 13px; }
-      pre { white-space: pre-wrap; word-break: break-all; border: 1px solid #8884; padding: 8px; min-height: 4em; }
+      :root {
+        color-scheme: light;
+        font-family: system-ui, sans-serif;
+        --panel: rgba(255, 255, 255, 0.96);
+        --muted: #6c757d;
+        --ok: #2b8a3e;
+        --warn: #c92a2a;
+        --accent: #1971c2;
+      }
+      html, body { margin: 0; height: 100%; }
+      body { background: #e9ecef; }
+      #map { position: absolute; inset: 0; }
+      #panel {
+        position: absolute; top: 12px; left: 12px; bottom: 12px; width: 400px; overflow-y: auto;
+        background: var(--panel); border-radius: 10px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+        padding: 14px 16px; box-sizing: border-box; font-size: 13px;
+      }
+      @media (max-width: 720px) {
+        #panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; height: 48vh; border-radius: 10px 10px 0 0; }
+      }
+      h1 { font-size: 16px; margin: 0 0 2px; }
+      .lead { color: var(--muted); margin: 0 0 10px; }
+      #stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-family: ui-monospace, monospace; font-size: 13px;
+        background: #212529; color: #f8f9fa; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+      #stats dt { color: #adb5bd; }
+      #stats dd { margin: 0; font-weight: 600; }
+      #stat-network[data-online='false'] { color: #ffa8a8; }
+      #stat-network[data-online='true'] { color: #8ce99a; }
+      #phase { color: var(--muted); min-height: 1.2em; margin-bottom: 8px; }
+      body[data-state='error'] #phase { color: var(--warn); }
+      fieldset { border: 1px solid #dee2e6; border-radius: 8px; margin: 0 0 10px; padding: 8px 10px; }
+      legend { font-weight: 600; padding: 0 4px; }
+      .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
+      .mode button[aria-pressed='true'] { background: var(--accent); color: #fff; border-color: var(--accent); }
+      button { font: inherit; padding: 4px 10px; border: 1px solid #adb5bd; border-radius: 6px; background: #fff; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      select { font: inherit; }
+      .hint { color: var(--muted); margin: 4px 0 0; }
+      h2 { font-size: 14px; margin: 12px 0 6px; }
+      pre { white-space: pre-wrap; word-break: break-all; background: #f1f3f5; border-radius: 6px; padding: 8px; margin: 4px 0;
+        font-size: 12px; max-height: 260px; overflow: auto; }
+      pre.plan { white-space: pre; word-break: normal; font-size: 10px; line-height: 1.15; }
+      .label { font-weight: 600; margin-top: 8px; }
+      #metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+      #metrics div { background: #f1f3f5; border-radius: 6px; padding: 6px 8px; }
+      #metrics b { display: block; font-size: 16px; }
+      #index-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-weight: 600; font-size: 12px; }
+      #index-badge[data-used='true'] { background: #d3f9d8; color: var(--ok); }
+      #index-badge[data-used='false'] { background: #ffe3e3; color: var(--warn); }
+      #results-list { margin: 4px 0; padding-left: 18px; }
+      #results-list li { margin: 1px 0; }
+      .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+      details { margin-top: 12px; border-top: 1px solid #dee2e6; padding-top: 8px; }
+      summary { cursor: pointer; font-weight: 600; }
+      #console { display: grid; gap: 6px; margin-top: 8px; }
+      #console .row input { flex: 1; font-family: ui-monospace, monospace; }
+      textarea { font-family: ui-monospace, monospace; font-size: 12px; width: 100%; box-sizing: border-box; }
+      #presets { display: flex; flex-wrap: wrap; gap: 4px; }
     </style>
   </head>
-  <body>
-    <h1>In-browser NGSI-LD broker</h1>
-    <p>DuckDB-Wasm + OPFS. Requests below go to <code>broker.fetch(Request)</code>, not to a server.</p>
-    <p id="status" data-state="loading">loading DuckDB-Wasm…</p>
-    <div id="presets"></div>
-    <form id="console">
-      <div class="row">
-        <select id="method" aria-label="method">
-          <option>GET</option>
-          <option>POST</option>
-          <option>DELETE</option>
-        </select>
-        <input id="path" aria-label="path" value="/ngsi-ld/v1/entities?type=Building" />
-        <button id="send" type="submit">Send</button>
-      </div>
-      <textarea id="headers" aria-label="headers" rows="2" placeholder="Header: value (one per line)"></textarea>
-      <textarea id="body" aria-label="body" rows="12" placeholder="request body"></textarea>
-    </form>
-    <h2>Response</h2>
-    <pre id="response"></pre>
+  <body data-state="loading">
+    <div id="map"></div>
+    <aside id="panel">
+      <h1>NGSI-LD Context Broker, in your browser</h1>
+      <p class="lead">Tens of thousands of geospatial entities in DuckDB-Wasm on OPFS, queried through the NGSI-LD API. No server.</p>
+
+      <dl id="stats">
+        <dt>Entities:</dt><dd id="stat-entities">…</dd>
+        <dt>Storage:</dt><dd>OPFS</dd>
+        <dt>Database:</dt><dd id="stat-database">DuckDB-Wasm</dd>
+        <dt>Server:</dt><dd>NONE</dd>
+        <dt>Network:</dt><dd id="stat-network">…</dd>
+        <dt>Last query:</dt><dd id="stat-last-query">–</dd>
+      </dl>
+      <div id="phase">Starting DuckDB-Wasm…</div>
+
+      <fieldset>
+        <legend>GeoQuery from the map</legend>
+        <div class="row mode">
+          <button type="button" id="mode-near" aria-pressed="true">Near: click</button>
+          <select id="radius" aria-label="radius">
+            <option value="250">250 m</option>
+            <option value="500">500 m</option>
+            <option value="1000" selected>1 km</option>
+            <option value="2000">2 km</option>
+          </select>
+          <button type="button" id="mode-within" aria-pressed="false">Within: draw polygon</button>
+        </div>
+        <div class="row">
+          <label>type <select id="type-filter" aria-label="type filter"><option value="">all types</option></select></label>
+          <button type="button" id="clear">Clear</button>
+        </div>
+        <p class="hint" id="mode-hint">Click the map to find entities within the radius.</p>
+      </fieldset>
+
+      <section id="query" hidden>
+        <div id="metrics">
+          <div>matches<b id="m-count">–</b></div>
+          <div>SQL<b id="m-sql">–</b></div>
+          <div>total<b id="m-total">–</b></div>
+        </div>
+        <div class="label">NGSI-LD request (via <code>broker.fetch</code>)</div>
+        <pre id="q-request"></pre>
+        <div class="label">Lowered to SQL (DuckDB Spatial)</div>
+        <pre id="q-sql"></pre>
+        <div class="label">Query plan <span id="index-badge"></span></div>
+        <details id="plan-details"><summary>EXPLAIN</summary><pre class="plan" id="q-plan"></pre></details>
+        <div class="label">Results <span id="q-shown"></span></div>
+        <ol id="results-list"></ol>
+      </section>
+
+      <details id="advanced">
+        <summary>Advanced / Debug</summary>
+        <p class="hint">Send any request to <code>broker.fetch(Request)</code>. Seed: <span id="seed-info">…</span></p>
+        <div id="presets"></div>
+        <form id="console">
+          <div class="row">
+            <select id="method" aria-label="method"><option>GET</option><option>POST</option><option>DELETE</option></select>
+            <input id="path" aria-label="path" value="/ngsi-ld/v1/entities?type=Station&amp;limit=5" />
+            <button id="send" type="submit">Send</button>
+          </div>
+          <textarea id="headers" aria-label="headers" rows="2" placeholder="Header: value (one per line)"></textarea>
+          <textarea id="body" aria-label="body" rows="8" placeholder="request body"></textarea>
+        </form>
+        <pre id="response"></pre>
+        <div class="row">
+          <button type="button" id="export-db">Download .duckdb</button>
+          <button type="button" id="reset-db">Delete the OPFS database</button>
+        </div>
+      </details>
+    </aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

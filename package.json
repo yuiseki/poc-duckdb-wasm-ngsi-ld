@@ -15,14 +15,18 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "seed": "node scripts/build-entities.mjs && node scripts/build-seed-db.mjs"
   },
   "dependencies": {
     "@duckdb/duckdb-wasm": "^1.32.0",
-    "jsonld": "^9.0.0"
+    "jsonld": "^9.0.0",
+    "maplibre-gl": "^6.11.2"
   },
   "devDependencies": {
+    "@duckdb/node-api": "^1.4.5-r.1",
     "@playwright/test": "1.58",
+    "@types/geojson": "^7946.0.16",
     "@types/jsonld": "^1.5.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.1",

@@ -96,7 +96,7 @@ export function boundingBox(lon: number, lat: number, metres: number): [number, 
 
 /**
  * Lower a query to SQL. Geo predicates the R-tree can answer run in a
- * MATERIALIZED CTE directly over `attributes`: only a filter sitting right on
+ * MATERIALIZED CTE directly over `geometries`: only a filter sitting right on
  * the table scan is rewritten into RTREE_INDEX_SCAN, and a correlated EXISTS,
  * or a distance test in the same filter, would turn it back into a full scan.
  */
@@ -121,20 +121,20 @@ export function lowerEntityQuery(q: EntityQuery): LoweredQuery {
       const [lon, lat] = g.geometry.coordinates as number[];
       const box = g.maxDistance !== undefined ? boundingBox(lon, lat, g.maxDistance) : null;
       if (box) {
-        cte = 'SELECT a.entity_id, a.geom FROM attributes a WHERE a.name = ? AND ST_Intersects(a.geom, ST_MakeEnvelope(?, ?, ?, ?))';
+        cte = 'SELECT g.eid, g.geom FROM geometries g WHERE g.name = ? AND ST_Intersects(g.geom, ST_MakeEnvelope(?, ?, ?, ?))';
         cteParams.push(g.geoproperty, ...box);
-        where.push(`e.id IN (SELECT g.entity_id FROM geo g WHERE ${tests.join(' AND ')})`);
+        where.push(`e.eid IN (SELECT g.eid FROM geo g WHERE ${tests.join(' AND ')})`);
       } else {
-        where.push(`e.id IN (SELECT g.entity_id FROM attributes g WHERE g.name = ? AND g.geom IS NOT NULL AND ${tests.join(' AND ')})`);
+        where.push(`e.eid IN (SELECT g.eid FROM geometries g WHERE g.name = ? AND ${tests.join(' AND ')})`);
         whereParams.push(g.geoproperty);
       }
       whereParams.push(...testParams);
     } else if (INDEXED[g.georel]) {
-      cte = `SELECT a.entity_id, a.geom FROM attributes a WHERE a.name = ? AND ${INDEXED[g.georel]}(a.geom, ${target})`;
+      cte = `SELECT g.eid, g.geom FROM geometries g WHERE g.name = ? AND ${INDEXED[g.georel]}(g.geom, ${target})`;
       cteParams.push(g.geoproperty, geomParam);
-      where.push('e.id IN (SELECT g.entity_id FROM geo g)');
+      where.push('e.eid IN (SELECT g.eid FROM geo g)');
     } else {
-      where.push(`e.id IN (SELECT a.entity_id FROM attributes a WHERE a.name = ? AND a.geom IS NOT NULL AND ST_Disjoint(a.geom, ${target}))`);
+      where.push(`e.eid IN (SELECT g.eid FROM geometries g WHERE g.name = ? AND ST_Disjoint(g.geom, ${target}))`);
       whereParams.push(g.geoproperty, geomParam);
     }
   }

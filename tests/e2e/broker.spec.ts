@@ -204,6 +204,16 @@ test.describe('broker.fetch', () => {
     expect(decodeURIComponent(r.headers['x-query-plan'])).toContain('RTREE_INDEX_SCAN');
   });
 
+  test('pick=id answers with ids only, and a complete result needs no count query', async ({ page }) => {
+    await call(page, 'POST', '/ngsi-ld/v1/entityOperations/create', { body: [TOKYO, SHINJUKU, OSAKA] });
+    const r = await call(page, 'GET', '/ngsi-ld/v1/entities?type=Building&pick=id&count=true');
+    expect(r.body).toEqual([{ id: OSAKA.id }, { id: SHINJUKU.id }, { id: TOKYO.id }].sort((a, b) => a.id.localeCompare(b.id)));
+    expect(r.headers['ngsild-results-count']).toBe('3');
+    expect(r.headers['server-timing']).not.toContain('count;');
+    const named = await call(page, 'GET', `/ngsi-ld/v1/entities?type=Building&pick=id,name&limit=1`);
+    expect(named.body).toEqual([{ id: OSAKA.id, name: OSAKA.name }]);
+  });
+
   test('GeoJSON representation', async ({ page }) => {
     await call(page, 'POST', '/ngsi-ld/v1/entities', { body: TOKYO });
     const r = await call(page, 'GET', '/ngsi-ld/v1/entities?type=Building', { headers: { Accept: 'application/geo+json' } });

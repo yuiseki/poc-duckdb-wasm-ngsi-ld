@@ -148,14 +148,29 @@ export class Broker {
     if (geo) q.geo = { ...geo, geoproperty: await expandAttrTerm(geo.geoproperty, context) };
     const geoproperty = geo?.geoproperty ?? 'location';
 
+    // pick (NGSI-LD 1.8 projection). pick=id alone is answered from the id query
+    // without loading any document.
+    const pick = params.get('pick')?.split(',').map((a) => a.trim()).filter(Boolean);
     const lowered = lowerEntityQuery(q);
-    const docs = await this.load(req, lowered.sql, lowered.params);
+    let docs: { value: Record<string, any>[]; sqlMs: number };
+    if (pick?.length === 1 && pick[0] === 'id') {
+      const ids = await this.store.selectIds(lowered.sql, lowered.params);
+      docs = { value: ids.value.map((id) => ({ id })), sqlMs: ids.sqlMs };
+    } else {
+      docs = await this.load(req, lowered.sql, lowered.params);
+      if (pick) docs.value = docs.value.map((d) => Object.fromEntries(Object.entries(d).filter(([k]) => pick.includes(k))));
+    }
     const headers: Record<string, string> = { [HEADER_SQL]: encodeURIComponent(renderSql(lowered.sql, lowered.params)) };
     const timing = [`sql;dur=${docs.sqlMs.toFixed(1)}`];
     if (params.get('count') === 'true') {
-      const count = await this.store.count(lowered.countSql, lowered.countParams);
-      headers['NGSILD-Results-Count'] = String(count.value);
-      timing.push(`count;dur=${count.sqlMs.toFixed(1)}`);
+      if (q.offset === 0 && docs.value.length < q.limit) {
+        // Everything that matched is already in hand.
+        headers['NGSILD-Results-Count'] = String(docs.value.length);
+      } else {
+        const count = await this.store.count(lowered.countSql, lowered.countParams);
+        headers['NGSILD-Results-Count'] = String(count.value);
+        timing.push(`count;dur=${count.sqlMs.toFixed(1)}`);
+      }
     }
     if (req.headers.get(HEADER_EXPLAIN) === '1') {
       headers[HEADER_PLAN] = encodeURIComponent(await this.store.explain(lowered.sql, lowered.params));

@@ -8,12 +8,16 @@ import { EntityMap, TYPE_COLORS } from './map';
 // ?seed=none starts from an empty database (used by the API tests);
 // ?seed=ndjson skips the prebuilt database and imports through the batch API.
 const SEED = new URLSearchParams(location.search).get('seed') ?? 'auto';
-const DB_FILE = SEED === 'none' ? 'ngsi-ld-empty.duckdb' : 'ngsi-ld-tokyo23.duckdb';
+// The schema version is in the file name: a database from an older build is left
+// behind (and removed below) rather than opened with the wrong tables.
+const SCHEMA_VERSION = 2;
+const DB_FILE = SEED === 'none' ? `ngsi-ld-empty-v${SCHEMA_VERSION}.duckdb` : `ngsi-ld-tokyo23-v${SCHEMA_VERSION}.duckdb`;
+const STALE_FILES = ['ngsi-ld.duckdb', 'ngsi-ld-tokyo23.duckdb', 'ngsi-ld-empty.duckdb'].flatMap((f) => [f, `${f}.wal`]);
 const SEED_DB_URL = new URL('seed/tokyo23.duckdb.gz', location.href).href;
 const SEED_NDJSON_URL = new URL('seed/tokyo23-entities.ndjson', location.href).href;
 const WARDS_URL = new URL('seed/tokyo23-wards.geojson', location.href).href;
 const ENTITIES = '/ngsi-ld/v1/entities';
-const RESULT_LIMIT = 5000;
+const RESULT_LIMIT = 10_000;
 const IMPORT_BATCH = 2000;
 
 declare global {
@@ -30,6 +34,8 @@ const ms = (n: number) => `${n < 10 ? n.toFixed(1) : Math.round(n)} ms`;
 const setPhase = (text: string) => ($('phase').textContent = text);
 
 let db: AsyncDuckDB;
+// What the map already holds about every entity, to label query results by id.
+const known = new Map<string, { type: string; name: string; category: string }>();
 let resolveBroker: (b: Broker) => void;
 window.broker = new Promise((r) => (resolveBroker = r));
 
@@ -76,6 +82,7 @@ async function importNdjson() {
 
 async function boot(map: Promise<EntityMap>) {
   const started = performance.now();
+  await removeOpfsFiles(STALE_FILES);
   let origin: string;
   if ((await opfsFileSize(DB_FILE)) > 0) {
     origin = 'restored from OPFS';
@@ -105,6 +112,9 @@ async function boot(map: Promise<EntityMap>) {
   const fc = (await res.json()) as GeoJSON.FeatureCollection;
   const m = await map;
   m.setEntities(slim(fc));
+  // One throwaway GeoQuery pulls the R-tree and the tables into DuckDB's buffer
+  // pool, so the first click is not the one that pays for reading them from OPFS.
+  await call(`${ENTITIES}?georel=near;maxDistance==100&geometry=Point&coordinates=[139.7671,35.6812]&pick=id`);
   const secs = ((performance.now() - started) / 1000).toFixed(1);
   setPhase(`Ready in ${secs} s: ${fmt(count)} entities ${origin}.${m.basemapOnline ? '' : ' Basemap unavailable offline.'}`);
   document.body.dataset.state = 'ready';
@@ -117,7 +127,12 @@ function slim(fc: GeoJSON.FeatureCollection): GeoJSON.FeatureCollection {
     type: 'FeatureCollection',
     features: fc.features
       .filter((f) => f.geometry)
-      .map((f) => ({ type: 'Feature', geometry: f.geometry, properties: { type: f.properties?.type, name: f.properties?.name?.value ?? '' } })),
+      .map((f) => {
+        const p = f.properties ?? {};
+        const props = { id: p.id, type: p.type, name: p.name?.value ?? '', category: p.category?.value ?? '' };
+        known.set(p.id, props);
+        return { type: 'Feature', geometry: f.geometry, properties: props };
+      }),
   };
 }
 
@@ -131,16 +146,18 @@ function typeParam(): string {
 }
 
 async function runQuery(query: string, m: EntityMap) {
-  const path = `${ENTITIES}?${query}&limit=${RESULT_LIMIT}&count=true`;
+  // pick=id: the map already has every entity's geometry and name, so the broker
+  // only has to say which ones matched.
+  const path = `${ENTITIES}?${query}&pick=id&limit=${RESULT_LIMIT}&count=true`;
   const t = performance.now();
-  const res = await call(path, { headers: { Accept: 'application/geo+json' } });
+  const res = await call(path);
   const elapsed = performance.now() - t;
   if (!res.ok) {
     $('q-request').textContent = `GET ${path}\n\n${res.status} ${await res.text()}`;
     return;
   }
-  const fc = (await res.json()) as GeoJSON.FeatureCollection;
-  m.setResults(slim(fc));
+  const ids = ((await res.json()) as { id: string }[]).map((e) => e.id);
+  m.setResults(ids);
 
   const timing = Object.fromEntries(
     (res.headers.get('Server-Timing') ?? '').split(',').map((p) => {
@@ -148,34 +165,35 @@ async function runQuery(query: string, m: EntityMap) {
       return [name, Number(dur)];
     }),
   );
+  const sqlMs = timing.sql + (timing.count ?? 0);
   const count = Number(res.headers.get('NGSILD-Results-Count'));
   $('query').hidden = false;
   $('m-count').textContent = fmt(count);
-  $('m-sql').textContent = ms(timing.sql);
+  $('m-sql').textContent = ms(sqlMs);
   $('m-total').textContent = ms(elapsed);
-  $('stat-last-query').textContent = `${ms(timing.sql)} SQL, ${ms(elapsed)} total`;
-  $('q-request').textContent = `GET ${path}\nAccept: application/geo+json`;
+  $('stat-last-query').textContent = `${ms(sqlMs)} SQL, ${ms(elapsed)} total`;
+  $('q-request').textContent = `GET ${path}`;
   $('q-sql').textContent = decodeURIComponent(res.headers.get(HEADER_SQL) ?? '');
-  $('q-shown').textContent = fc.features.length < count ? `(first ${fmt(fc.features.length)} drawn)` : '';
+  $('q-shown').textContent = ids.length < count ? `(first ${fmt(ids.length)} drawn)` : '';
 
-  const list = $('results-list');
-  list.replaceChildren(
-    ...fc.features.slice(0, 30).map((f) => {
+  $('results-list').replaceChildren(
+    ...ids.slice(0, 30).map((id) => {
+      const e = known.get(id);
       const li = document.createElement('li');
       const sw = document.createElement('span');
       sw.className = 'swatch';
-      sw.style.background = TYPE_COLORS[f.properties?.type] ?? '#868e96';
-      li.append(sw, `${f.properties?.name?.value ?? '(no name)'} `);
+      sw.style.background = TYPE_COLORS[e?.type ?? ''] ?? '#868e96';
       const small = document.createElement('small');
-      small.textContent = `${f.properties?.type} / ${f.properties?.category?.value ?? ''}`;
-      li.append(small);
+      small.textContent = `${e?.type ?? ''} / ${e?.category ?? ''}`;
+      li.append(sw, `${e?.name || '(no name)'} `, small);
+      li.title = id;
       return li;
     }),
   );
   document.body.dataset.queries = String(Number(document.body.dataset.queries ?? 0) + 1);
 
   // Ask the broker for DuckDB's plan of the same query, to show the index at work.
-  const plan = await call(path, { headers: { Accept: 'application/geo+json', [HEADER_EXPLAIN]: '1' } });
+  const plan = await call(path, { headers: { [HEADER_EXPLAIN]: '1' } });
   const text = decodeURIComponent(plan.headers.get(HEADER_PLAN) ?? '');
   $('q-plan').textContent = text;
   const badge = $('index-badge');
@@ -200,12 +218,17 @@ function bindControls(m: EntityMap) {
   $('clear').onclick = () => m.clear();
   setMode('near');
 
-  m.onNear = ([lon, lat]) => {
+  // Draw the shape first and let that frame render, so the query does not share
+  // the main thread with MapLibre and its timing reflects DuckDB.
+  const afterPaint = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  m.onNear = async ([lon, lat]) => {
     const r = Number($<HTMLSelectElement>('radius').value);
     m.showCircle([lon, lat], r);
+    await afterPaint();
     void runQuery(`${typeParam()}georel=near;maxDistance==${r}&geometry=Point&coordinates=[${round(lon)},${round(lat)}]`, m);
   };
-  m.onWithin = (ring) => {
+  m.onWithin = async (ring) => {
+    await afterPaint();
     const coords = JSON.stringify([ring.map(([x, y]) => [round(x), round(y)])]);
     void runQuery(`${typeParam()}georel=within&geometry=Polygon&coordinates=${coords}`, m);
   };

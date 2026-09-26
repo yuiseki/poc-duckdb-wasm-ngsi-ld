@@ -93,11 +93,12 @@ export class EntityMap {
     map.addLayer({ id: 'shape-line', type: 'line', source: 'shape', paint: { 'line-color': '#1971c2', 'line-width': 2 } });
     map.addLayer({ id: 'shape-points', type: 'circle', source: 'shape', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 4, 'circle-color': '#1971c2' } });
 
-    map.addSource('results', { type: 'geojson', data: empty() });
+    // Results are drawn from the entities source itself, filtered to the matched ids.
     map.addLayer({
       id: 'results',
       type: 'circle',
-      source: 'results',
+      source: 'entities',
+      filter: ['in', ['get', 'id'], ['literal', []]],
       paint: {
         'circle-color': color,
         'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2.5, 14, 5, 17, 8],
@@ -176,14 +177,14 @@ export class EntityMap {
     (this.map.getSource('entities') as GeoJSONSource).setData(fc);
   }
 
-  setResults(fc: GeoJSON.FeatureCollection) {
-    (this.map.getSource('results') as GeoJSONSource).setData(fc);
+  setResults(ids: string[]) {
+    this.map.setFilter('results', ['in', ['get', 'id'], ['literal', ids]]);
   }
 
   clear() {
     this.vertices = [];
     this.setShape([]);
-    this.setResults(empty());
+    this.setResults([]);
   }
 }
 

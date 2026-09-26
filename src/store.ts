@@ -3,8 +3,10 @@ import type { AsyncDuckDB, AsyncDuckDBConnection } from '@duckdb/duckdb-wasm';
 import type { CanonicalAttribute, CanonicalEntity } from './ngsi';
 
 const SCHEMA = `
+CREATE SEQUENCE IF NOT EXISTS entity_eid;
 CREATE TABLE IF NOT EXISTS entities (
   id          VARCHAR PRIMARY KEY,
+  eid         INTEGER NOT NULL DEFAULT nextval('entity_eid'),  -- compact key for geometries
   created_at  TIMESTAMPTZ NOT NULL,
   modified_at TIMESTAMPTZ NOT NULL,
   doc         JSON NOT NULL           -- normalized representation, compacted with the core context
@@ -20,10 +22,16 @@ CREATE TABLE IF NOT EXISTS attributes (
   attr_type  VARCHAR NOT NULL,        -- Property | Relationship | GeoProperty
   value      JSON,                    -- expanded ngsi-ld:hasValue
   object     VARCHAR,                 -- Relationship target
-  geom       GEOMETRY,                -- GeoProperty value
   instance   JSON NOT NULL            -- whole expanded attribute instance
 );
-CREATE INDEX IF NOT EXISTS attributes_geom_rtree ON attributes USING RTREE (geom);
+-- One row per GeoProperty instance. Kept narrow and keyed by an integer because every
+-- row an R-tree lookup returns is fetched one by one, and that fetch is the cost.
+CREATE TABLE IF NOT EXISTS geometries (
+  eid  INTEGER NOT NULL,
+  name VARCHAR NOT NULL,              -- expanded IRI of the GeoProperty
+  geom GEOMETRY NOT NULL
+);
+CREATE INDEX IF NOT EXISTS geometries_rtree ON geometries USING RTREE (geom);
 `;
 
 export interface StoredEntity {
@@ -128,20 +136,27 @@ export class Store {
               attr_type: a.attrType,
               value: a.value,
               object: a.object,
-              geojson: a.geojson ? JSON.stringify(a.geojson) : null,
               instance: a.instance,
             })),
           ),
-          "entity_id: 'VARCHAR', name: 'VARCHAR', dataset_id: 'VARCHAR', attr_type: 'VARCHAR', value: 'JSON', object: 'VARCHAR', geojson: 'VARCHAR', instance: 'JSON'",
+          "entity_id: 'VARCHAR', name: 'VARCHAR', dataset_id: 'VARCHAR', attr_type: 'VARCHAR', value: 'JSON', object: 'VARCHAR', instance: 'JSON'",
+        );
+        const geometries = await this.stage(
+          files,
+          batch.flatMap((e) =>
+            e.attributes.filter((a) => a.geojson).map((a) => ({ entity_id: e.id, name: a.name, geojson: JSON.stringify(a.geojson) })),
+          ),
+          "entity_id: 'VARCHAR', name: 'VARCHAR', geojson: 'VARCHAR'",
         );
         await this.transaction(async () => {
-          await this.all(`INSERT INTO entities SELECT id, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ, doc FROM ${docs}`, [now, now]);
-          await this.all(`INSERT INTO entity_types SELECT entity_id, type FROM ${types}`);
           await this.all(
-            `INSERT INTO attributes
-             SELECT entity_id, name, dataset_id, attr_type, value, object,
-                    CASE WHEN geojson IS NULL THEN NULL ELSE ST_GeomFromGeoJSON(geojson) END, instance
-             FROM ${attributes}`,
+            `INSERT INTO entities (id, created_at, modified_at, doc) SELECT id, ?::TIMESTAMPTZ, ?::TIMESTAMPTZ, doc FROM ${docs}`,
+            [now, now],
+          );
+          await this.all(`INSERT INTO entity_types SELECT entity_id, type FROM ${types}`);
+          await this.all(`INSERT INTO attributes SELECT * FROM ${attributes}`);
+          await this.all(
+            `INSERT INTO geometries SELECT e.eid, g.name, ST_GeomFromGeoJSON(g.geojson) FROM ${geometries} g JOIN entities e ON e.id = g.entity_id`,
           );
         });
         return { created: batch.map((e) => e.id), conflicts };
@@ -155,11 +170,17 @@ export class Store {
     return this.exclusive(async () => {
       if (!(await this.all('SELECT 1 FROM entities WHERE id = ?', [id])).length) return false;
       await this.transaction(async () => {
+        await this.all('DELETE FROM geometries WHERE eid = (SELECT eid FROM entities WHERE id = ?)', [id]);
         for (const table of ['attributes', 'entity_types']) await this.all(`DELETE FROM ${table} WHERE entity_id = ?`, [id]);
         await this.all('DELETE FROM entities WHERE id = ?', [id]);
       });
       return true;
     });
+  }
+
+  /** The ids selected by `idSql`, in order, without touching the documents. */
+  selectIds(idSql: string, params: unknown[]): Promise<Timed<string[]>> {
+    return this.timed(async () => (await this.all(idSql, params)).map((r) => r.id as string));
   }
 
   /** The stored core-context documents of the entities selected by `idSql`, in id order. */

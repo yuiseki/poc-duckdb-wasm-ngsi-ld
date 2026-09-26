@@ -54,6 +54,8 @@ test('first load, GeoQueries from the map, reload, relaunch', async ({ baseURL }
     expect(total).toBeGreaterThan(70_000);
     await expect(page.locator('#stats')).toContainText('Server:NONE');
     await expect(page.locator('#stats')).toContainText('Storage:OPFS');
+    const rendered = (layer: string) => page.evaluate(async (l) => (await window.entityMap).map.queryRenderedFeatures({ layers: [l] }).length, layer);
+    await expect.poll(() => rendered('entities')).toBeGreaterThan(10_000);
 
     // 2. near: a click on the map becomes an NGSI-LD GeoQuery, lowered to SQL on the R-tree.
     const near = await query(page, () => clickAt(page, TOKYO_STATION));
@@ -63,6 +65,8 @@ test('first load, GeoQueries from the map, reload, relaunch', async ({ baseURL }
     expect(near.count).toBeGreaterThan(500);
     await expect(page.locator('#stat-last-query')).toHaveText(/^[\d.]+ ms SQL, [\d.]+ ms total$/);
     await expect(page.locator('#results-list li')).toHaveCount(30);
+    // Every match is highlighted on the map.
+    await expect.poll(() => rendered('results')).toBe(near.count);
 
     // 3. within: a polygon drawn on the map.
     await page.locator('#mode-within').click();
@@ -72,7 +76,7 @@ test('first load, GeoQueries from the map, reload, relaunch', async ({ baseURL }
     });
     // Pixels round-trip through the map projection, so vertices come back within a few metres.
     expect(within.request).toMatch(/georel=within&geometry=Polygon&coordinates=\[\[\[139\.74\d+,35\.67\d+\],/);
-    expect(within.sql).toContain('ST_Within(a.geom');
+    expect(within.sql).toContain('ST_Within(g.geom');
     expect(within.badge).toBe('RTREE_INDEX_SCAN');
     expect(within.count).toBeGreaterThan(0);
 

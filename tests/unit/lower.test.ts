@@ -59,7 +59,7 @@ describe('lowerEntityQuery', () => {
   it('lowers near;maxDistance to an R-tree box prefilter plus an exact spherical distance', () => {
     const q = lowerEntityQuery({ geo: { georel: 'near', maxDistance: 1000, geometry: point, geoproperty: LOC }, limit: 20, offset: 0 });
     expect(q.sql).toContain('WITH geo AS MATERIALIZED');
-    expect(q.sql).toContain('ST_Intersects(a.geom, ST_MakeEnvelope(?, ?, ?, ?))');
+    expect(q.sql).toContain('ST_Intersects(g.geom, ST_MakeEnvelope(?, ?, ?, ?))');
     // ST_Distance_Sphere takes [lat, lon]; NGSI-LD/GeoJSON is [lon, lat].
     expect(q.sql).toContain('ST_Distance_Sphere(ST_FlipCoordinates(g.geom), ST_FlipCoordinates(ST_GeomFromGeoJSON(?))) <= ?');
     const [name, ...rest] = q.params;
@@ -75,22 +75,22 @@ describe('lowerEntityQuery', () => {
   });
 
   it.each([
-    ['within', 'ST_Within(a.geom, ST_GeomFromGeoJSON(?))'],
-    ['contains', 'ST_Contains(a.geom, ST_GeomFromGeoJSON(?))'],
-    ['intersects', 'ST_Intersects(a.geom, ST_GeomFromGeoJSON(?))'],
-    ['equals', 'ST_Equals(a.geom, ST_GeomFromGeoJSON(?))'],
-    ['overlaps', 'ST_Overlaps(a.geom, ST_GeomFromGeoJSON(?))'],
+    ['within', 'ST_Within(g.geom, ST_GeomFromGeoJSON(?))'],
+    ['contains', 'ST_Contains(g.geom, ST_GeomFromGeoJSON(?))'],
+    ['intersects', 'ST_Intersects(g.geom, ST_GeomFromGeoJSON(?))'],
+    ['equals', 'ST_Equals(g.geom, ST_GeomFromGeoJSON(?))'],
+    ['overlaps', 'ST_Overlaps(g.geom, ST_GeomFromGeoJSON(?))'],
   ] as const)('lowers %s into the R-tree CTE', (georel, fragment) => {
     const q = lowerEntityQuery({ geo: { georel, geometry: point, geoproperty: 'p' }, limit: 1, offset: 0 });
     expect(q.sql).toContain('WITH geo AS MATERIALIZED');
     expect(q.sql).toContain(fragment);
-    expect(q.sql).toContain('e.id IN (SELECT g.entity_id FROM geo g)');
+    expect(q.sql).toContain('e.eid IN (SELECT g.eid FROM geo g)');
   });
 
   it('lowers disjoint without the index', () => {
     const q = lowerEntityQuery({ geo: { georel: 'disjoint', geometry: point, geoproperty: 'p' }, limit: 1, offset: 0 });
     expect(q.sql).not.toContain('WITH geo');
-    expect(q.sql).toContain('ST_Disjoint(a.geom, ST_GeomFromGeoJSON(?))');
+    expect(q.sql).toContain('ST_Disjoint(g.geom, ST_GeomFromGeoJSON(?))');
   });
 
   it('combines type and geo with AND, CTE parameters first', () => {

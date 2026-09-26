@@ -16,6 +16,7 @@ const STALE_FILES = ['ngsi-ld.duckdb', 'ngsi-ld-tokyo23.duckdb', 'ngsi-ld-empty.
 const SEED_DB_URL = new URL('seed/tokyo23.duckdb.gz', location.href).href;
 const SEED_NDJSON_URL = new URL('seed/tokyo23-entities.ndjson', location.href).href;
 const WARDS_URL = new URL('seed/tokyo23-wards.geojson', location.href).href;
+const EXTENSIONS_URL = new URL('duckdb-extensions', location.href).href;
 const ENTITIES = '/ngsi-ld/v1/entities';
 const RESULT_LIMIT = 10_000;
 const IMPORT_BATCH = 2000;
@@ -95,7 +96,7 @@ async function boot(map: Promise<EntityMap>) {
   }
 
   setPhase('Opening DuckDB-Wasm on OPFS…');
-  db = await openDuckDB(`opfs://${DB_FILE}`);
+  db = await openDuckDB(`opfs://${DB_FILE}`, EXTENSIONS_URL);
   $('stat-database').textContent = `DuckDB-Wasm ${await db.getVersion()}`;
   const broker = await Broker.open(db);
   resolveBroker(broker);
@@ -331,6 +332,11 @@ function bindConsole() {
 }
 
 // ---- start -------------------------------------------------------------------------
+
+// Production only: the Service Worker keeps the app itself for offline use (sw/sw.js).
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('service worker:', e));
+}
 
 const map = EntityMap.create($('map'), WARDS_URL);
 window.entityMap = map;

@@ -14,7 +14,11 @@ const BUNDLES: duckdb.DuckDBBundles = {
  * `opfs://` path, in which case the database file lives in the
  * Origin Private File System and survives reloads and browser restarts.
  */
-export async function openDuckDB(path: string): Promise<duckdb.AsyncDuckDB> {
+/**
+ * `extensionRepository`, if given, is where DuckDB installs extensions from (and
+ * autoloads them from) instead of extensions.duckdb.org; see scripts/fetch-extensions.mjs.
+ */
+export async function openDuckDB(path: string, extensionRepository?: string): Promise<duckdb.AsyncDuckDB> {
   const bundle = await duckdb.selectBundle(BUNDLES);
   const worker = new Worker(bundle.mainWorker!);
   const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
@@ -30,6 +34,12 @@ export async function openDuckDB(path: string): Promise<duckdb.AsyncDuckDB> {
     await db.registerFileHandle(`${path}.wal`, wal, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
   }
   await db.open({ path, accessMode: duckdb.DuckDBAccessMode.READ_WRITE });
+  if (extensionRepository) {
+    const conn = await db.connect();
+    const repo = extensionRepository.replace(/'/g, "''");
+    await conn.query(`SET GLOBAL custom_extension_repository = '${repo}'; SET GLOBAL autoinstall_extension_repository = '${repo}';`);
+    await conn.close();
+  }
   return db;
 }
 

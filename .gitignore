@@ -4,3 +4,4 @@ test-results
 playwright-report
 data/cache
 public/seed
+public/duckdb-extensions

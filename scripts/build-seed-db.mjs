@@ -5,7 +5,7 @@
 // Runs the app itself in headless Chromium with ?seed=ndjson, so the entities go in
 // through POST /ngsi-ld/v1/entityOperations/create and the file is written by the same
 // DuckDB-Wasm build that will read it. Needs public/seed/tokyo23-entities.ndjson
-// (scripts/build-entities.mjs).
+// (scripts/build-entities.mjs) and public/duckdb-extensions (scripts/fetch-extensions.mjs).
 import { chromium } from '@playwright/test';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -19,26 +19,48 @@ if (!existsSync('public/seed/tokyo23-entities.ndjson')) throw new Error('run scr
 // A stale seed would be copied instead of importing the NDJSON; the page must not see it.
 rmSync(OUT, { force: true });
 
+const log = (msg) => console.log(`[seed-db ${new Date().toISOString().slice(11, 19)}] ${msg}`);
+const withTimeout = (promise, ms, what) =>
+  Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms / 1000} s: ${what}`)), ms))]);
+
 // detached: its own process group, so killing it also stops the vite child of npx.
 const server = spawn('npx', ['vite', '--port', String(PORT), '--strictPort'], { stdio: ['ignore', 'pipe', 'inherit'], detached: true });
-await new Promise((resolve, reject) => {
-  server.stdout.on('data', (d) => String(d).includes('Local:') && resolve());
-  server.on('exit', (code) => reject(new Error(`vite exited with ${code}`)));
-});
+server.stdout.on('data', (d) => process.stdout.write(`[vite] ${d}`));
+server.on('exit', (code) => code && log(`vite exited with ${code}`));
+// Poll the server rather than parse its banner: on CI the banner is coloured and
+// "Local:" is split by escape codes.
+await withTimeout(
+  (async () => {
+    for (;;) {
+      if (server.exitCode !== null) throw new Error(`vite exited with ${server.exitCode}`);
+      const ok = await fetch(`http://localhost:${PORT}/`).then((r) => r.ok, () => false);
+      if (ok) return;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  })(),
+  60_000,
+  'vite dev server start',
+);
+log('vite is up');
 
 const profile = mkdtempSync(join(tmpdir(), 'ngsi-ld-seed-'));
 try {
   const ctx = await chromium.launchPersistentContext(profile);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.error('pageerror:', e.message));
+  page.on('console', (m) => m.type() === 'error' && console.error('console error:', m.text()));
+  log('chromium is up');
   const started = Date.now();
-  await page.goto(`http://localhost:${PORT}/?seed=ndjson`);
+  await page.goto(`http://localhost:${PORT}/?seed=ndjson`, { timeout: 120_000 });
+  log('page loaded');
   let last = '';
-  for (;;) {
+  for (let tick = 0; ; tick++) {
     const s = await page.evaluate(() => ({ state: document.body.dataset.state, phase: document.getElementById('phase').textContent }));
-    if (s.phase !== last) console.log(`${((Date.now() - started) / 1000).toFixed(0)}s ${(last = s.phase)}`);
+    // Print on every change, and every 30 s anyway so a stall is visible.
+    if (s.phase !== last || tick % 30 === 0) log(`${((Date.now() - started) / 1000).toFixed(0)}s ${(last = s.phase)}`);
     if (s.state === 'error') throw new Error(s.phase);
     if (s.state === 'ready') break;
+    if (Date.now() - started > 15 * 60_000) throw new Error(`not ready after 15 min: ${s.phase}`);
     await page.waitForTimeout(1000);
   }
   // The page's "Download .duckdb" button hands the OPFS file over as a download.

@@ -118,3 +118,40 @@ test('first load, GeoQueries from the map, reload, relaunch', async ({ baseURL }
     rmSync(profile, { recursive: true, force: true });
   }
 });
+
+test('after one online visit, the page opens and answers GeoQueries with the network off', async ({ baseURL }) => {
+  const profile = mkdtempSync(join(tmpdir(), 'ngsi-ld-offline-'));
+  try {
+    let ctx = await chromium.launchPersistentContext(profile, { baseURL, viewport: { width: 1400, height: 900 } });
+    let page = await ctx.newPage();
+    await page.goto('/');
+    await waitReady(page);
+    const online = await query(page, () => clickAt(page, TOKYO_STATION));
+    // Wait until the Service Worker holds the app shell, DuckDB-Wasm and its extensions.
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.waitForFunction(
+      async () => {
+        const shell = (await caches.keys()).find((k) => k.startsWith('shell-'));
+        const urls = shell ? (await (await caches.open(shell)).keys()).map((r) => r.url) : [];
+        return urls.some((u) => u.endsWith('spatial.duckdb_extension.wasm')) && urls.some((u) => /duckdb-eh-.*\.wasm$/.test(u));
+      },
+      null,
+      { timeout: 120_000, polling: 1000 },
+    );
+    await ctx.close();
+
+    // Relaunch with no network at all: the page comes from the Service Worker, the data from OPFS.
+    ctx = await chromium.launchPersistentContext(profile, { baseURL, viewport: { width: 1400, height: 900 }, offline: true });
+    page = await ctx.newPage();
+    await page.goto('/');
+    await waitReady(page);
+    await expect(page.locator('#stat-network')).toHaveText('OFFLINE');
+    expect(await page.locator('body').getAttribute('data-origin')).toBe('restored from OPFS');
+    const offline = await query(page, () => clickAt(page, TOKYO_STATION));
+    expect(offline.count).toBe(online.count);
+    expect(offline.badge).toBe('RTREE_INDEX_SCAN');
+    await ctx.close();
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
+});

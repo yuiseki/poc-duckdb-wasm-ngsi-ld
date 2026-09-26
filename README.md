@@ -2,7 +2,7 @@
 
 An NGSI-LD Context Broker with tens of thousands of geospatial entities,
 persistent storage, spatial indexing and GeoQuery, running entirely inside
-your browser.
+your browser, even offline.
 
 Demo: https://yuiseki.github.io/poc-duckdb-wasm-ngsi-ld/
 
@@ -18,6 +18,10 @@ Demo: https://yuiseki.github.io/poc-duckdb-wasm-ngsi-ld/
 - GeoQueries are lowered to SQL for DuckDB Spatial and answered through an
   R-tree index: a 1 km `near` around Tokyo Station matches 1,160 entities in
   about 20 to 30 ms.
+- After one visit it works offline: a Service Worker keeps the page,
+  DuckDB-Wasm and its extensions, and OPFS keeps the data. Close the
+  browser, turn the network off, open the page again, and the same
+  GeoQueries answer.
 
 This is a proof of concept, not a conformant NGSI-LD implementation. It has
 been tested with Chromium only.
@@ -37,7 +41,11 @@ been tested with Chromium only.
 4. Reload, or close the browser and open the page again: the database comes
    back from OPFS (`restored from OPFS`) and the same queries give the same
    answers.
-5. "Advanced / Debug" has a request console for any NGSI-LD call (POST,
+5. Go offline (DevTools, Network, Offline, or turn the network off), close
+   the browser, open the page again: `Network: OFFLINE`, and the queries
+   still answer. The basemap shows only the tiles you looked at while
+   online; the entities, the ward outline and the queries do not need it.
+6. "Advanced / Debug" has a request console for any NGSI-LD call (POST,
    GET, DELETE), a button to download the `.duckdb` file, and one to
    delete it.
 
@@ -78,7 +86,7 @@ map; on the demo site, add the download of the seed.
 
 ```sh
 npm install
-npm run seed         # build public/seed/ (downloads the source data; see Data)
+npm run setup        # public/duckdb-extensions and public/seed (downloads; see Data)
 npm run dev          # http://localhost:5173
 npm run build        # static files in dist/, serve them with any static host
 npm run preview      # serve dist/ locally
@@ -99,11 +107,12 @@ npm run test:e2e     # end-to-end (Playwright, Chromium) against the production 
 a click issues a `near` query and a drawn polygon a `within` query, both
 answered through `RTREE_INDEX_SCAN` and highlighted on the map; then a
 reload and a browser relaunch on the same profile restore the database
-from OPFS, give the same answer, and still accept a POST.
+from OPFS, give the same answer, and still accept a POST. A second test
+relaunches the browser with the network off after one online visit and
+runs the same query.
 `tests/e2e/broker.spec.ts` covers the API on an empty database. Both need
-`npm run seed` first, a Playwright Chromium (`npx playwright install
-chromium`) and network access to `extensions.duckdb.org` (see
-Constraints).
+`npm run setup` first and a Playwright Chromium (`npx playwright install
+chromium`).
 
 `npm run smoke -- <url>` checks a deployed copy. GitHub Actions builds the
 seed, runs the unit and end-to-end tests on every push, and deploys `dist/`
@@ -235,12 +244,21 @@ Persistence. Each write runs in a transaction followed by `CHECKPOINT`, so
 the OPFS `.duckdb` file is self-contained after every request. The file
 name carries a schema version; files of older versions are deleted.
 
-Service Worker. The broker cannot run inside a Service Worker: DuckDB-Wasm
-needs a dedicated Worker and OPFS sync access handles are only available in
+Offline. `scripts/fetch-extensions.mjs` puts the DuckDB spatial and json
+extensions (pinned by sha256) under `duckdb-extensions/`, and the page
+points `custom_extension_repository` there, so nothing is fetched from
+`extensions.duckdb.org`. The Service Worker (`sw/sw.js`; the build writes
+the list of files into it) precaches the page, DuckDB-Wasm, its worker,
+the extensions and the ward outline, about 61 MB, and caches basemap
+requests as they happen. Navigation is network-first so a new deploy shows
+up; everything else is served from the cache.
+
+The broker itself does not run in the Service Worker: DuckDB-Wasm needs a
+dedicated Worker and OPFS sync access handles are only available in
 dedicated Workers, neither of which a Service Worker can create. Because
-the API is `Request -> Response`, a Service Worker could still expose it at
-real URLs by relaying requests to a page that owns the broker. This relay
-is not implemented.
+the API is `Request -> Response`, a Service Worker could still expose it
+at real URLs by relaying requests to a page that owns the broker. This
+relay is not implemented.
 
 ## Data
 
@@ -283,9 +301,12 @@ outline.
   copied seed) got a replay-only WAL handle and every COMMIT failed with
   `File is not opened in write mode`; `src/db.ts` registers the WAL itself
   before opening.
-- The spatial and json extensions are downloaded at startup from
-  `extensions.duckdb.org`, and the basemap from `tile.yuiseki.net`.
-  Everything else is served from the site.
+- The basemap comes from `tile.yuiseki.net`. Offline, only tiles seen
+  while online are shown (the Service Worker keeps them without a size
+  limit); everything else is served from the site.
+- Offline use needs one complete online visit first, and the Service
+  Worker precaches only the EH build of DuckDB-Wasm, which current
+  Chromium, Firefox and Safari use.
 - One tab per origin. A second tab fails to open the database with
   `Access Handles cannot be created if there is another open Access Handle`.
 - `near` matches Point attributes only, the query geometry for `near` must
@@ -310,7 +331,7 @@ home-made JSON-LD processor.
 
 Code: MIT, see [LICENSE](LICENSE).
 
-Data: the seed built by `npm run seed` is derived from OpenStreetMap,
+Data: the seed built by `npm run setup` is derived from OpenStreetMap,
 © OpenStreetMap contributors, under the
 [Open Database License](https://opendatacommons.org/licenses/odbl/). The
 published seed files (`seed/` on the demo site) are distributed under the

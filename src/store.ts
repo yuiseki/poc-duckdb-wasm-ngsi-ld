@@ -57,7 +57,9 @@ export class Store {
 
   static async open(db: AsyncDuckDB): Promise<Store> {
     const conn = await db.connect();
-    await conn.query('INSTALL spatial; LOAD spatial;');
+    // json is also autoloaded on demand; loading it here makes it come from the
+    // configured repository at a known point, like spatial.
+    await conn.query('INSTALL json; LOAD json; INSTALL spatial; LOAD spatial;');
     await conn.query(SCHEMA);
     return new Store(db, conn);
   }

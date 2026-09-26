@@ -153,7 +153,25 @@ function typeParam(): string {
   return t ? `type=${t}&` : '';
 }
 
-async function runQuery(query: string, m: EntityMap) {
+/** Metres between two lon/lat points (haversine), for ordering the result list. */
+function distance([lon1, lat1]: number[], [lon2, lat2]: number[]): number {
+  const r = Math.PI / 180;
+  const a = Math.sin(((lat2 - lat1) * r) / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(((lon2 - lon1) * r) / 2) ** 2;
+  return 2 * 6_371_008.8 * Math.asin(Math.sqrt(a));
+}
+
+/** The broker answers in id order; the list shows the nearest first (near) or named first (within). */
+function forList(ids: string[], center?: [number, number]): string[] {
+  const rank = (id: string) => {
+    const f = known.get(id);
+    if (!f) return Infinity;
+    if (center && f.geometry.type === 'Point') return distance(center, f.geometry.coordinates);
+    return f.properties.name ? 0 : 1;
+  };
+  return ids.map((id) => [id, rank(id)] as const).sort((a, b) => a[1] - b[1]).slice(0, 30).map(([id]) => id);
+}
+
+async function runQuery(query: string, m: EntityMap, center?: [number, number]) {
   // pick=id: the map already has every entity's geometry and name, so the broker
   // only has to say which ones matched.
   const path = `${ENTITIES}?${query}&pick=id&limit=${RESULT_LIMIT}&count=true`;
@@ -185,7 +203,7 @@ async function runQuery(query: string, m: EntityMap) {
   $('q-shown').textContent = ids.length < count ? `(first ${fmt(ids.length)} drawn)` : '';
 
   $('results-list').replaceChildren(
-    ...ids.slice(0, 30).map((id) => {
+    ...forList(ids, center).map((id) => {
       const e = known.get(id)?.properties;
       const li = document.createElement('li');
       const sw = document.createElement('span');
@@ -233,7 +251,7 @@ function bindControls(m: EntityMap) {
     const r = Number($<HTMLSelectElement>('radius').value);
     m.showCircle([lon, lat], r);
     await afterPaint();
-    void runQuery(`${typeParam()}georel=near;maxDistance==${r}&geometry=Point&coordinates=[${round(lon)},${round(lat)}]`, m);
+    void runQuery(`${typeParam()}georel=near;maxDistance==${r}&geometry=Point&coordinates=[${round(lon)},${round(lat)}]`, m, [lon, lat]);
   };
   m.onWithin = async (ring) => {
     await afterPaint();

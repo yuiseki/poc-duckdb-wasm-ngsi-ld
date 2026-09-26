@@ -27,6 +27,12 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npx playwright install --with-deps chromium
+      # The source extract is pinned by md5 in scripts/build-entities.mjs.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: data/cache
+          key: osm-tokyo23-${{ hashFiles('scripts/build-entities.mjs') }}
+      - run: npm run seed
       - run: npm run test:e2e
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         if: github.event_name != 'pull_request'

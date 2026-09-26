@@ -93,12 +93,13 @@ export class EntityMap {
     map.addLayer({ id: 'shape-line', type: 'line', source: 'shape', paint: { 'line-color': '#1971c2', 'line-width': 2 } });
     map.addLayer({ id: 'shape-points', type: 'circle', source: 'shape', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 4, 'circle-color': '#1971c2' } });
 
-    // Results are drawn from the entities source itself, filtered to the matched ids.
+    // A small source of just the matches: filtering the 73k-point source instead
+    // would make MapLibre rebuild every tile of it on each query.
+    map.addSource('results', { type: 'geojson', data: empty() });
     map.addLayer({
       id: 'results',
       type: 'circle',
-      source: 'entities',
-      filter: ['in', ['get', 'id'], ['literal', []]],
+      source: 'results',
       paint: {
         'circle-color': color,
         'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2.5, 14, 5, 17, 8],
@@ -177,8 +178,16 @@ export class EntityMap {
     (this.map.getSource('entities') as GeoJSONSource).setData(fc);
   }
 
-  setResults(ids: string[]) {
-    this.map.setFilter('results', ['in', ['get', 'id'], ['literal', ids]]);
+  setResults(features: GeoJSON.Feature[]) {
+    (this.map.getSource('results') as GeoJSONSource).setData({ type: 'FeatureCollection', features });
+  }
+
+  /** Resolves once MapLibre has finished loading and drawing what it has. */
+  idle(): Promise<void> {
+    // Ask for a frame so an already idle map fires 'idle' again instead of never.
+    const done = new Promise<void>((resolve) => this.map.once('idle', () => resolve()));
+    this.map.triggerRepaint();
+    return done;
   }
 
   clear() {

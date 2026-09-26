@@ -35,7 +35,7 @@ const setPhase = (text: string) => ($('phase').textContent = text);
 
 let db: AsyncDuckDB;
 // What the map already holds about every entity, to label query results by id.
-const known = new Map<string, { type: string; name: string; category: string }>();
+const known = new Map<string, GeoJSON.Feature<GeoJSON.Geometry, { id: string; type: string; name: string; category: string }>>();
 let resolveBroker: (b: Broker) => void;
 window.broker = new Promise((r) => (resolveBroker = r));
 
@@ -115,6 +115,9 @@ async function boot(map: Promise<EntityMap>) {
   // One throwaway GeoQuery pulls the R-tree and the tables into DuckDB's buffer
   // pool, so the first click is not the one that pays for reading them from OPFS.
   await call(`${ENTITIES}?georel=near;maxDistance==100&geometry=Point&coordinates=[139.7671,35.6812]&pick=id`);
+  // Let MapLibre finish tiling the points before inviting clicks: until then it
+  // keeps the main thread busy, and query timings would include that wait.
+  await m.idle();
   const secs = ((performance.now() - started) / 1000).toFixed(1);
   setPhase(`Ready in ${secs} s: ${fmt(count)} entities ${origin}.${m.basemapOnline ? '' : ' Basemap unavailable offline.'}`);
   document.body.dataset.state = 'ready';
@@ -129,9 +132,13 @@ function slim(fc: GeoJSON.FeatureCollection): GeoJSON.FeatureCollection {
       .filter((f) => f.geometry)
       .map((f) => {
         const p = f.properties ?? {};
-        const props = { id: p.id, type: p.type, name: p.name?.value ?? '', category: p.category?.value ?? '' };
-        known.set(p.id, props);
-        return { type: 'Feature', geometry: f.geometry, properties: props };
+        const feature = {
+          type: 'Feature' as const,
+          geometry: f.geometry,
+          properties: { id: p.id, type: p.type, name: p.name?.value ?? '', category: p.category?.value ?? '' },
+        };
+        known.set(p.id, feature);
+        return feature;
       }),
   };
 }
@@ -157,7 +164,7 @@ async function runQuery(query: string, m: EntityMap) {
     return;
   }
   const ids = ((await res.json()) as { id: string }[]).map((e) => e.id);
-  m.setResults(ids);
+  m.setResults(ids.flatMap((id) => known.get(id) ?? []));
 
   const timing = Object.fromEntries(
     (res.headers.get('Server-Timing') ?? '').split(',').map((p) => {
@@ -178,7 +185,7 @@ async function runQuery(query: string, m: EntityMap) {
 
   $('results-list').replaceChildren(
     ...ids.slice(0, 30).map((id) => {
-      const e = known.get(id);
+      const e = known.get(id)?.properties;
       const li = document.createElement('li');
       const sw = document.createElement('span');
       sw.className = 'swatch';
